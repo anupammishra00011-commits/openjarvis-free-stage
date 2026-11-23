@@ -1,0 +1,17 @@
+# Staging-only; existing Render Free resources. No credentials in Git.
+services:
+  - type: web
+    name: openjarvis-free-stage-preflight
+    runtime: node
+    repo: https://github.com/anupammishra00011-commits/openjarvis-free-stage
+    branch: main
+    plan: free
+    region: singapore
+    buildCommand: npm install --omit=dev --no-audit --no-fund && npm test
+    startCommand: npm start
+    autoDeployTrigger: off
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: openjarvis-rag-preview
+          property: connectionString
