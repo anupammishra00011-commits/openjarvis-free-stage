@@ -9,6 +9,7 @@ const maxBody=8192;
 const secret=process.env.STAGE_GATEWAY_KEY||"";
 const dbUrl=process.env.DATABASE_URL||"";
 const pool=dbUrl?new Pool({connectionString:dbUrl,max:1,idleTimeoutMillis:5000,connectionTimeoutMillis:6000,statement_timeout:8000}):null;
+const liveChecks={mcpHandshake:"pending",allowedReadTools:"pending"};
 function send(res,status,body){res.writeHead(status,{"content-type":"application/json; charset=utf-8","cache-control":"no-store","x-content-type-options":"nosniff"});res.end(JSON.stringify(body))}
 async function bodyJson(req){
  let parts=[],size=0;
@@ -47,7 +48,7 @@ async function makeMcp(){
 const httpServer=http.createServer(async(req,res)=>{
  try{
   const path=(req.url||"").split("?")[0];
-  if(path==="/health"&&req.method==="GET")return send(res,200,{ok:true,...safeStatus(Boolean(dbUrl))});
+  if(path==="/health"&&req.method==="GET")return send(res,200,{ok:true,...safeStatus(Boolean(dbUrl)),liveChecks});
   if(!authorize(req.headers.authorization,secret))return send(res,secret.length<32?503:401,{error:secret.length<32?"Staging key not configured":"Unauthorized"});
   if(path==="/admin/status"&&req.method==="GET"){
    try{return send(res,200,{ok:true,db:await dbStatus()})}catch{return send(res,503,{ok:false,error:"Database unreachable"})}
@@ -65,5 +66,36 @@ const httpServer=http.createServer(async(req,res)=>{
   return send(res,404,{error:"Not found"});
  }catch{return send(res,400,{error:"Invalid request"})}
 });
-httpServer.listen(port,"0.0.0.0",()=>console.log("OpenJarvis staging preflight listening on "+port));
+async function verifyLiveMcp(){
+ const url="http://127.0.0.1:"+port+"/mcp";
+ async function request(id,method,params){
+  const res=await fetch(url,{method:"POST",headers:{
+   "Content-Type":"application/json",
+   "Accept":"application/json, text/event-stream",
+   "Authorization":"Bearer "+secret
+  },body:JSON.stringify({jsonrpc:"2.0",id,method,params})});
+  const data=await res.text();
+  if(!res.ok)throw Error("Local MCP returned HTTP "+res.status);
+  return data;
+ }
+ try{
+  const init=await request(401,"initialize",{protocolVersion:"2025-11-25",capabilities:{},clientInfo:{name:"stage-selftest",version:"0.1.0"}});
+  if(!init.includes("serverInfo"))throw Error("Initialize failed");
+  liveChecks.mcpHandshake="passed";
+  const listed=await request(402,"tools/list",{});
+  if(!listed.includes("stage_status")||!listed.includes("pgvector_status")||/delete_all|write_file|execute_shell/.test(listed))throw Error("Tool list violates allowlist");
+  const result=await request(403,"tools/call",{name:"stage_status",arguments:{}});
+  if(!result.includes("non-production")||!result.includes("read-only"))throw Error("Read-only tool call failed");
+  liveChecks.allowedReadTools="passed";
+  console.log("STAGING_LIVE_MCP_SELFTEST=PASS");
+ }catch{
+  if(liveChecks.mcpHandshake==="pending")liveChecks.mcpHandshake="failed";
+  liveChecks.allowedReadTools="failed";
+  console.error("STAGING_LIVE_MCP_SELFTEST=FAIL");
+ }
+}
+httpServer.listen(port,"0.0.0.0",()=>{
+ console.log("OpenJarvis staging preflight listening on "+port);
+ setTimeout(verifyLiveMcp,1000).unref();
+});
 process.on("SIGTERM",()=>{httpServer.close();pool?.end()});
